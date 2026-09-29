@@ -1,0 +1,282 @@
+# Investigation Notes
+
+## DNS Resolution
+
+The destination was resolved locally:
+
+```powershell
+Resolve-DnsName example.com
+```
+
+Observed:
+
+```text
+example.com
+A
+172.66.147.243
+```
+
+```text
+example.com
+A
+104.20.23.154
+```
+
+An IPv6 address was also returned:
+
+```text
+2606:4700:9765:72db:f2a5:0:ef6b:ff98
+```
+
+The Elastic network event later referenced:
+
+```text
+172.66.147.243
+```
+
+## Controlled Request
+
+The following command was executed:
+
+```powershell
+curl.exe -I https://example.com
+```
+
+The response returned:
+
+```text
+HTTP/1.1 200 OK
+```
+
+Relevant headers included:
+
+```text
+Content-Type: text/html; charset=utf-8
+Connection: keep-alive
+Server: cloudflare
+```
+
+This confirmed that the controlled HTTPS request completed successfully.
+
+## Process Telemetry
+
+Elastic recorded:
+
+```text
+Sep 30, 2026 @ 04:13:21.732
+```
+
+Observed:
+
+```text
+Host: desktop-9mmm37v
+User: Dell
+Process: curl.exe
+PID: 12968
+Parent: pwsh.exe
+Parent PID: 34288
+Executable: C:\Windows\System32\curl.exe
+```
+
+The process command line contained the controlled `example.com` request.
+
+The process relationship was:
+
+```text
+pwsh.exe
+    |
+    +-- curl.exe
+```
+
+## Process-Specific Query
+
+The query:
+
+```esql
+FROM logs-*
+| WHERE process.command_line LIKE "*example.com*"
+| KEEP @timestamp, host.name, user.name, process.name, process.pid, process.parent.name, process.parent.pid, process.command_line, process.executable
+| SORT @timestamp DESC
+```
+
+returned one document.
+
+This provided direct process-level evidence for the controlled request.
+
+## Network Event
+
+Elastic recorded:
+
+```text
+Sep 30, 2026 @ 04:13:21.865
+```
+
+with:
+
+```text
+Host: desktop-9mmm37v
+User: Dell
+Process: curl.exe
+PID: 12968
+Destination: 172.66.147.243
+Destination Port: 443
+Transport: tcp
+```
+
+This established the process-to-network relationship:
+
+```text
+curl.exe
+    |
+    +-- TCP connection
+          |
+          +-- 172.66.147.243:443
+```
+
+## Destination Query
+
+The following query returned one document:
+
+```esql
+FROM logs-*
+| WHERE destination.address == "172.66.147.243"
+| KEEP @timestamp, host.name, user.name, process.name, process.pid, process.parent.name, destination.address, destination.port, network.transport
+| SORT @timestamp DESC
+```
+
+Observed process:
+
+```text
+curl.exe
+```
+
+Observed port:
+
+```text
+443
+```
+
+Observed transport:
+
+```text
+tcp
+```
+
+## HTTPS Baseline
+
+A broader HTTPS query:
+
+```esql
+FROM logs-*
+| WHERE event.category == "network"
+| WHERE destination.port == 443
+| KEEP @timestamp, process.name, process.parent.name, user.name, destination.address, destination.port
+| SORT @timestamp DESC
+```
+
+returned:
+
+```text
+73 documents processed
+```
+
+and later:
+
+```text
+193 documents processed
+```
+
+depending on the query window.
+
+Observed applications included:
+
+```text
+chrome.exe
+Photos.exe
+curl.exe
+```
+
+This showed that outbound HTTPS activity was common on the endpoint.
+
+## Browser / Application Comparison
+
+Observed Chrome connections included destinations such as:
+
+```text
+172.64.155.209
+104.18.32.47
+64.239.123.1
+44.219.165.61
+```
+
+Photos.exe was also observed communicating over TCP/443.
+
+This demonstrated that a network connection to port 443 should not be treated as suspicious based solely on the port.
+
+## Local TCP Validation
+
+The endpoint was inspected with:
+
+```powershell
+Get-NetTCPConnection -State Established |
+Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort, State, OwningProcess
+```
+
+Observed established connections included:
+
+```text
+Chrome PID 24112
+    |
+    +-- 76.223.31.44:443
+```
+
+and:
+
+```text
+Chrome PID 24112
+    |
+    +-- 104.18.39.21:443
+```
+
+Other established network connections were also present.
+
+## Analyst Assessment
+
+### Observed
+
+- Controlled `curl.exe` execution.
+- `pwsh.exe → curl.exe` process relationship.
+- HTTPS request to `example.com`.
+- Destination `172.66.147.243`.
+- TCP destination port `443`.
+- Matching DNS resolution.
+- Matching process and network telemetry.
+- Other legitimate-looking application HTTPS connections.
+
+### Confirmed
+
+- The controlled request completed successfully.
+- Elastic captured the process event.
+- Elastic captured the corresponding network event.
+- The network event was associated with `curl.exe`.
+- No malicious payload was introduced.
+
+### Unknown
+
+- Nothing in the captured evidence independently establishes malicious intent.
+- Broader network activity may contain connections unrelated to the controlled test.
+
+## Malicious Activity Assessment
+
+The evidence does not demonstrate:
+
+```text
+Command-and-control
+Malware communication
+Data exfiltration
+Credential theft
+Persistence
+Compromise
+```
+
+The controlled connection is consistent with the intentionally generated HTTPS request.
